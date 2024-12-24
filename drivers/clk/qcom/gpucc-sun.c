@@ -418,7 +418,7 @@ static struct gdsc gpu_cc_cx_gdsc = {
 	.supply = "vdd_cx",
 };
 
-static int gdsc_cx_smmu_do_nothing(struct generic_pm_domain *domain)
+static int gdsc_cx_do_nothing(struct generic_pm_domain *domain)
 {
 	return 0;
 }
@@ -431,8 +431,8 @@ static struct gdsc gpu_cc_cx_smmu_gdsc = {
 	.clk_dis_wait_val = 0xf,
 	.pd = {
 		.name = "gpu_cc_cx_smmu_gdsc",
-		.power_on = gdsc_cx_smmu_do_nothing,
-		.power_off = gdsc_cx_smmu_do_nothing,
+		.power_on = gdsc_cx_do_nothing,
+		.power_off = gdsc_cx_do_nothing,
 	},
 	.pwrsts = PWRSTS_OFF_ON,
 	.flags = RETAIN_FF_ENABLE | VOTABLE,
@@ -447,8 +447,8 @@ static struct gdsc gpu_cc_cx_gmu_gdsc = {
 	.clk_dis_wait_val = 0x8,
 	.pd = {
 		.name = "gpu_cc_cx_gmu_gdsc",
-		.power_on = gdsc_cx_smmu_do_nothing,
-		.power_off = gdsc_cx_smmu_do_nothing,
+		.power_on = gdsc_cx_do_nothing,
+		.power_off = gdsc_cx_do_nothing,
 	},
 	.pwrsts = PWRSTS_OFF_ON,
 	.flags = RETAIN_FF_ENABLE | VOTABLE,

@@ -3062,6 +3062,9 @@ static int haptics_load_custom_effect(struct haptics_chip *chip,
 	kvfree(fifo->samples);
 	fifo->samples = kcalloc(custom_data.length, sizeof(u8), GFP_KERNEL);
 	if (!fifo->samples) {
+#ifdef OPLUS_FEATURE_CHG_BASIC
+		dev_err(chip->dev, "failed to kcalloc memory, try vmalloc\n");
+#endif
 		fifo->samples = vmalloc(custom_data.length);
 		if (!fifo->samples) {
 			rc = -ENOMEM;
@@ -6472,7 +6475,7 @@ static int richtap_load_prebake(struct haptics_chip *chip, u8 *data, u32 length)
 	 * Before allocating samples buffer, free the old sample
 	 * buffer first if it's not been freed.
 	 */
-	kfree(fifo->samples);
+	kvfree(fifo->samples);
 	fifo->samples = kcalloc(custom_data.length, sizeof(u8), GFP_KERNEL);
 	if (!fifo->samples) {
 		rc = -ENOMEM;
@@ -6501,7 +6504,7 @@ static int richtap_load_prebake(struct haptics_chip *chip, u8 *data, u32 length)
 
 	return 0;
 cleanup:
-	kfree(fifo->samples);
+	kvfree(fifo->samples);
 	fifo->samples = NULL;
 unlock:
 	atomic_set(&chip->direct_richtap_status, false);

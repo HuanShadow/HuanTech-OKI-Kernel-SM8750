@@ -1413,6 +1413,12 @@ static unsigned int msm_geni_serial_get_mctrl(struct uart_port *uport)
 	struct msm_geni_serial_port *port = GET_DEV_PORT(uport);
 
 	if (!uart_console(uport)) {
+		if (!port->ioctl_count) {
+			UART_LOG_DBG(port->ipc_log_misc, uport->dev,
+				     "%s.ioctl vote is not present, %s\n",
+				     __func__, current->comm);
+			return mctrl | TIOCM_CTS;
+		}
 		if (!mutex_trylock(&port->suspend_resume_lock)) {
 			UART_LOG_DBG(port->ipc_log_misc, uport->dev,
 					"%s.Device is being suspended, %s\n",
@@ -1465,6 +1471,12 @@ static void msm_geni_serial_set_mctrl(struct uart_port *uport,
 	u32 uart_manual_rfr = 0;
 	struct msm_geni_serial_port *port = GET_DEV_PORT(uport);
 
+	if (!port->ioctl_count) {
+		UART_LOG_DBG(port->ipc_log_misc, uport->dev,
+			     "%s.ioctl vote is not present, %s: mctrl=0x%x\n",
+			     __func__, current->comm, mctrl);
+		return;
+	}
 	if (!mutex_trylock(&port->suspend_resume_lock)) {
 		UART_LOG_DBG(port->ipc_log_misc, uport->dev,
 			     "%s: Device is being suspended, %s\n",

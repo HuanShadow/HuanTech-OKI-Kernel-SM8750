@@ -725,10 +725,8 @@ static int tmc_add_coresight_dev(struct amba_device *adev, const struct amba_id 
 	if (!IS_ERR(drvdata->dclk)) {
 		ret = clk_prepare_enable(drvdata->dclk);
 		if (ret)
-            return ret == -ETIMEDOUT ? -EPROBE_DEFER : ret;
-            //			goto out;
-
-        
+			return ret == -ETIMEDOUT ? -EPROBE_DEFER : ret;
+			//goto out;
 	} else
 		drvdata->dclk = NULL;
 

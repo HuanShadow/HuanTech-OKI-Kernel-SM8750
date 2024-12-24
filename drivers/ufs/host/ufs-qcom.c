@@ -3643,6 +3643,39 @@ cell_put:
 	nvmem_cell_put(nvmem_cell);
 }
 
+/*feature-iostack-v001-begin*/
+#define IOSTACK_WORK_DELAY  (10 * HZ)
+static void iostack_monitor_work(struct work_struct *work)
+{
+	struct ufs_qcom_host *host = container_of(to_delayed_work(work),
+							struct ufs_qcom_host,
+							iostack_work);
+	struct ufs_hba *hba = host->hba;
+	struct msi_desc *desc;
+	unsigned int irqs = 0;
+	unsigned int self_block = hba->host->host_self_blocked;
+
+	if (is_mcq_enabled(hba)) {
+		msi_lock_descs(hba->dev);
+		msi_for_each_desc(desc, hba->dev, MSI_DESC_ALL) {
+			irqs += kstat_irqs_usr(desc->irq);
+		}
+		msi_unlock_descs(hba->dev);
+	} else {
+		irqs = kstat_irqs_usr(hba->irq);
+	}
+
+	pr_err("iostack: irqs = %d, self-block = %d\n", irqs, self_block);
+	schedule_delayed_work(&host->iostack_work, IOSTACK_WORK_DELAY);
+}
+
+static void ufs_iostack_init(struct ufs_qcom_host *host)
+{
+	INIT_DELAYED_WORK(&host->iostack_work, iostack_monitor_work);
+	schedule_delayed_work(&host->iostack_work, IOSTACK_WORK_DELAY);
+}
+/*feature-iostack-v001-end*/
+
 /**
  * ufs_qcom_init - bind phy with controller
  * @hba: host controller instance
@@ -3831,6 +3864,7 @@ static int ufs_qcom_init(struct ufs_hba *hba)
 	ufs_qcom_save_host_ptr(hba);
 
 	ufs_qcom_qos_init(hba);
+	ufs_iostack_init(host);
 	ufs_qcom_parse_irq_affinity(hba);
 	ufs_qcom_ber_mon_init(hba);
 	host->ufs_ipc_log_ctx = ipc_log_context_create(UFS_QCOM_MAX_LOG_SZ,

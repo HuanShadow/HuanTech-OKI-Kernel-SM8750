@@ -1548,12 +1548,24 @@ static void rproc_recovery_set(struct rproc *rproc)
 void qcom_rproc_update_recovery_status(struct rproc *rproc, bool enable)
 {
 	struct qcom_adsp *adsp;
+#if 1
+/* Add for fix dead lock issue. ALM[7955950] */
+	int lock_acquired = 0;
+#endif
 
 	if (!rproc)
 		return;
 
 	adsp = (struct qcom_adsp *)rproc->priv;
+#if 0
+/* Add for fix dead lock issue. ALM[7955950] */
 	mutex_lock(&rproc->lock);
+#else
+	lock_acquired = mutex_trylock(&rproc->lock);
+	if (!lock_acquired) {
+		pr_warn("[%s]someone already got the lock to change rproc config, directly change this\n", __func__);
+	}
+#endif
 	if (enable) {
 		/* Save recovery flag */
 		adsp->subsys_recovery_disabled = rproc->recovery_disabled;
@@ -1564,7 +1576,14 @@ void qcom_rproc_update_recovery_status(struct rproc *rproc, bool enable)
 		rproc->recovery_disabled = adsp->subsys_recovery_disabled;
 		pr_info("qcom rproc: %s: recovery disabled by kernel client\n", rproc->name);
 	}
+#if 0
+/* Add for fix dead lock issue. ALM[7955950] */
 	mutex_unlock(&rproc->lock);
+#else
+	if (lock_acquired) {
+		mutex_unlock(&rproc->lock);
+	}
+#endif
 }
 EXPORT_SYMBOL_GPL(qcom_rproc_update_recovery_status);
 

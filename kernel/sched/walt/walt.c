@@ -29,6 +29,10 @@
 #include <../kernel/oplus_cpu/sched/frame_boost/frame_group.h>
 #endif
 
+#ifdef CONFIG_OPLUS_SCHED_GROUP_OPT
+#include <../kernel/oplus_cpu/sched/sched_assist/sa_group.h>
+#endif
+
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_GKI_CPUFREQ_BOUNCING)
 #include <linux/cpufreq_bouncing.h>
 #endif
@@ -3757,6 +3761,10 @@ static void android_rvh_cpu_cgroup_online(void *unused, struct cgroup_subsys_sta
 		return;
 
 	walt_update_tg_pointer(css);
+
+#ifdef CONFIG_OPLUS_SCHED_GROUP_OPT
+	oplus_update_tg_map(css);
+#endif
 }
 
 static void android_rvh_cpu_cgroup_attach(void *unused,
