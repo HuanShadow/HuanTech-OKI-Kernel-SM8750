@@ -224,7 +224,11 @@
 
 #define HAP_CFG_AUTORES_CFG_REG			0x63
 #define AUTORES_EN_BIT				BIT(7)
+#ifdef OPLUS_FEATURE_CHG_BASIC
+#define AUTORES_EN_DLY_MASK			GENMASK(6, 2)
+#else
 #define AUTORES_EN_DLY_MASK			GENMASK(5, 2)
+#endif
 #define AUTORES_EN_DLY(cycles)			((cycles) * 2)
 #define AUTORES_EN_DLY_6_CYCLES			AUTORES_EN_DLY(6)
 #define AUTORES_EN_DLY_7_CYCLES			AUTORES_EN_DLY(7)
@@ -474,9 +478,6 @@
 #define AUTO_BRAKE_CAL_DONE			0x80
 
 #define PBS_ARG_REG				0x42
-#define HAP_VREG_ON_VAL				0x1
-#define HAP_VREG_OFF_VAL			0x2
-#define HAP_AUTO_BRAKE_CAL_VAL			0x3
 #define PBS_TRIG_SET_REG			0xE5
 #define PBS_TRIG_CLR_REG			0xE6
 #define PBS_TRIG_SET_VAL			0x1
@@ -536,6 +537,13 @@ enum hap_status_sel {
 	CLAMPED_DUTY_CYCLE_STS = 0x8003,
 	FIFO_REAL_TIME_STS = 0x8005,
 	AUTO_BRAKE_CAL_STS = 0x8006,
+};
+
+enum hap_pbs_type {
+	HAP_VREG_ON_PBS = 0x1,
+	HAP_VREG_OFF_PBS = 0x2,
+	HAP_AUTO_BRAKE_CAL_PBS = 0x3,
+	HAP_HBST_OVP_TRIM_PBS = 0x10,
 };
 
 enum drv_sig_shape {
@@ -620,6 +628,8 @@ enum wa_flags {
 	SLEEP_CLK_32K_SCALE = BIT(2),
 	TOGGLE_EN_TO_FLUSH_FIFO = BIT(3),
 	RECOVER_SWR_SLAVE = BIT(4),
+	IGNORE_SWR_IN_SPMI_PLAY = BIT(7),
+	DISCHARGE_VNDRV_LDO = BIT(8),
 };
 
 static const char * const src_str[] = {
@@ -780,6 +790,7 @@ struct haptics_hw_config {
 	bool			is_erm;
 	bool			measure_lra_impedance;
 	bool			sw_cmd_freq_det;
+	bool			hbst_ovp_trim;
 };
 
 struct custom_fifo_data {
@@ -1522,6 +1533,22 @@ static int haptics_module_enable(struct haptics_chip *chip, bool enable)
 {
 	u8 val;
 	int rc;
+	unsigned int delay_us = 100;
+
+	/*
+	 * Increase the delay to 500us for HAP530_HV to remove the potential
+	 * overshoot on VNDRV when there is a rapid haptics module enable and
+	 * disable sequence.
+	 */
+	if (chip->hw_type >= HAP530_HV)
+		delay_us = 500;
+
+	/*
+	 * Delay for a while before enabling haptics module to avoid
+	 * it's mistakenly blocked by HW debounce logic.
+	 */
+	if (enable)
+		usleep_range(delay_us, delay_us + 1);
 
 	val = enable ? HAPTICS_EN_BIT : 0;
 	rc = haptics_write(chip, chip->cfg_addr_base,
@@ -1548,7 +1575,6 @@ static int haptics_toggle_module_enable(struct haptics_chip *chip)
 	if (rc < 0)
 		return rc;
 
-	usleep_range(100, 101);
 	return haptics_module_enable(chip, true);
 }
 
@@ -1568,8 +1594,19 @@ static int haptics_check_hpwr_status(struct haptics_chip *chip)
 			break;
 
 		val &= HPWR_INTF_STATUS_MASK;
-		if ((val == HPWR_DISABLED) || (val == HPWR_READY))
-			break;
+		if (chip->wa_flags & DISCHARGE_VNDRV_LDO) {
+			/*
+			 * Haptics VNDRV LDO has already been disabled when HPWR_DISABLED
+			 * status is set, delay 500us here to discharge the VNDRV voltage.
+			 */
+			if (val == HPWR_DISABLED) {
+				usleep_range(500, 501);
+				break;
+			}
+		} else {
+			if ((val == HPWR_DISABLED) || (val == HPWR_READY))
+				break;
+		}
 
 		usleep_range(1000, 1001);
 	}
@@ -1734,6 +1771,19 @@ static int __haptics_set_vmax_mv(struct haptics_chip *chip, u32 vmax_mv)
 	return rc;
 }
 
+static int haptics_ignore_swr_play(struct haptics_chip *chip, bool enable)
+{
+	int rc;
+	u8 val = enable ? SWR_IGNORE_BIT : 0;
+
+	rc = haptics_masked_write(chip, chip->cfg_addr_base,
+			HAP_CFG_TRIG_PRIORITY_REG, SWR_IGNORE_BIT, val);
+	if (rc < 0)
+		dev_err(chip->dev, "update SWR_IGNORE_BIT failed, rc=%d\n", rc);
+
+	return rc;
+}
+
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_BSP_DRV_VND_INJECT_TEST)
 noinline
 #endif
@@ -1868,6 +1918,34 @@ static int haptics_set_direct_play(struct haptics_chip *chip, u8 amplitude)
 	return rc;
 }
 
+static int haptics_trigger_pbs(struct haptics_chip *chip, enum hap_pbs_type type)
+{
+	int rc;
+	u8 val;
+
+	val = (u8)type;
+	rc = nvmem_device_write(chip->hap_cfg_nvmem, PBS_ARG_REG, 1, &val);
+	if (rc < 0) {
+		dev_err(chip->dev, "set PBS_ARG for auto brake cal failed, rc=%d\n", rc);
+		return rc;
+	}
+
+	val = PBS_TRIG_CLR_VAL;
+	rc = nvmem_device_write(chip->hap_cfg_nvmem, PBS_TRIG_CLR_REG, 1, &val);
+	if (rc < 0) {
+		dev_err(chip->dev, "clear PBS_TRIG for auto brake cal failed, rc=%d\n", rc);
+		return rc;
+	}
+
+	val = PBS_TRIG_SET_VAL;
+	rc = nvmem_device_write(chip->hap_cfg_nvmem, PBS_TRIG_SET_REG, 1, &val);
+	if (rc < 0)
+		dev_err(chip->dev, "set PBS_TRIG for auto brake cal failed, rc=%d\n", rc);
+
+	return rc;
+}
+
+
 static bool is_boost_vreg_enabled_in_open_loop(struct haptics_chip *chip)
 {
 	int rc;
@@ -1896,7 +1974,7 @@ static bool is_boost_vreg_enabled_in_open_loop(struct haptics_chip *chip)
 static int haptics_boost_vreg_enable(struct haptics_chip *chip, bool en)
 {
 	int rc;
-	u8 val;
+	enum hap_pbs_type type;
 
 	if (is_haptics_external_powered(chip))
 		return 0;
@@ -1918,21 +1996,10 @@ static int haptics_boost_vreg_enable(struct haptics_chip *chip, bool en)
 	if (chip->hboost_enabled == en)
 		return 0;
 
-	val = en ? HAP_VREG_ON_VAL : HAP_VREG_OFF_VAL;
-	rc = nvmem_device_write(chip->hap_cfg_nvmem,
-			PBS_ARG_REG, 1, &val);
+	type = en ? HAP_VREG_ON_PBS : HAP_VREG_OFF_PBS;
+	rc = haptics_trigger_pbs(chip, type);
 	if (rc < 0) {
-		dev_err(chip->dev, "write SDAM %#x failed, rc=%d\n",
-				PBS_ARG_REG, rc);
-		return rc;
-	}
-
-	val = PBS_TRIG_SET_VAL;
-	rc = nvmem_device_write(chip->hap_cfg_nvmem,
-			PBS_TRIG_SET_REG, 1, &val);
-	if (rc < 0) {
-		dev_err(chip->dev, "Write SDAM %#x failed, rc=%d\n",
-				PBS_TRIG_SET_REG, rc);
+		dev_err(chip->dev, "trigger HAP_VREG_ON/OFF PBS failed, rc=%d\n", rc);
 		return rc;
 	}
 
@@ -2167,6 +2234,10 @@ static int haptics_wait_brake_complete(struct haptics_chip *chip)
 		}
 
 		if ((val & HPWR_INTF_STATUS_MASK) == HPWR_DISABLED) {
+			/* Delay 500us to discharge the VNDRV voltage after play is stopped */
+			if (chip->wa_flags & DISCHARGE_VNDRV_LDO)
+				usleep_range(500, 501);
+
 			dev_dbg(chip->dev, "stopped play completely");
 			break;
 		}
@@ -2176,6 +2247,16 @@ static int haptics_wait_brake_complete(struct haptics_chip *chip)
 	} while (--timeout);
 
 	if (timeout == 0) {
+		/*
+		 * If there is a SWR play in the background, HPWR_DISABLED
+		 * bit won't be set and toggling HAPTICS_EN will re-initiate
+		 * the voltage requested from hBoost, it would cause potential
+		 * glitches on hBoost output which is unexpected, hence ignore
+		 * doing that in such case.
+		 */
+		if (is_swr_play_enabled(chip))
+			return 0;
+
 		dev_warn(chip->dev, "poll HPWR_DISABLED failed after stopped play\n");
 		return haptics_toggle_module_enable(chip);
 	}
@@ -2198,12 +2279,12 @@ static int haptics_enable_play(struct haptics_chip *chip, bool en)
 	if (en) {
 		rc = haptics_clear_fault(chip);
 		if (rc < 0)
-			return rc;
+			goto restore;
 	}
 
 	rc = haptics_open_loop_drive_config(chip, en);
 	if (rc < 0)
-		return rc;
+		goto restore;
 
 	val = play->pattern_src;
 	if (chip->hw_type == HAP525_HV && play->pattern_src == PATTERN_MEM)
@@ -2219,8 +2300,11 @@ static int haptics_enable_play(struct haptics_chip *chip, bool en)
 			HAP_CFG_SPMI_PLAY_REG, &val, 1);
 	if (rc < 0) {
 		dev_err(chip->dev, "Write SPMI_PLAY failed, rc=%d\n", rc);
-		return rc;
+		goto restore;
 	}
+
+	haptics_read(chip, chip->hbst_addr_base, 0x09, &val, 1);
+	dev_err(chip->dev, "haptics_enable_play, 0xf209=0x%x\n", val);
 
 	if (!en)
 		haptics_wait_brake_complete(chip);
@@ -2231,7 +2315,7 @@ static int haptics_enable_play(struct haptics_chip *chip, bool en)
 			if (rc < 0) {
 				dev_err(chip->dev, "Keep boost vreg on failed, rc=%d\n",
 						rc);
-				return rc;
+				goto restore;
 			}
 		} else {
 			hrtimer_start(&chip->hbst_off_timer,
@@ -2246,6 +2330,11 @@ static int haptics_enable_play(struct haptics_chip *chip, bool en)
 #endif
 
 	trace_qcom_haptics_play(en);
+restore:
+	/* Restore SWR play mode after SPMI play mode is done or any faults */
+	if ((!en || rc) && (chip->wa_flags & IGNORE_SWR_IN_SPMI_PLAY))
+		haptics_ignore_swr_play(chip, false);
+
 	return rc;
 }
 
@@ -3314,6 +3403,23 @@ static int haptics_upload_effect(struct input_dev *dev,
 	u8 amplitude;
 	int rc = 0;
 
+	/*
+	 * When switching between SWR and SPMI play, the haptics module doesn't
+	 * set HPWR_DISABLED status especially if triggering a SPMI play before
+	 * SWR play is not de-asserted. This triggers haptics enable toggling
+	 * workaround trying to recover the HW in multiple places and it is
+	 * unexpected.
+	 *
+	 * To avoid this, set SWR_IGNORE before triggering a SPMI play, and
+	 * unset SWR_IGNORE after the SPMI play is stopped.
+	 */
+	if (chip->wa_flags & IGNORE_SWR_IN_SPMI_PLAY) {
+		rc = haptics_ignore_swr_play(chip, true);
+		if (rc < 0)
+			goto restore;
+	}
+
+
 	switch (effect->type) {
 	case FF_CONSTANT:
 #ifdef OPLUS_FEATURE_RICHTAP_SUPPORT // quit rihctap while direct play
@@ -3340,14 +3446,15 @@ static int haptics_upload_effect(struct input_dev *dev,
 		if (rc < 0) {
 			dev_err(chip->dev, "set direct play failed, rc=%d\n",
 					rc);
-			return rc;
+			goto restore;
 		}
 
 		break;
 	case FF_PERIODIC:
 		if (effect->u.periodic.waveform != FF_CUSTOM) {
 			dev_err(chip->dev, "Only support custom waveforms\n");
-			return -EINVAL;
+			rc = -EINVAL;
+			goto restore;
 		}
 
 		if (effect->u.periodic.custom_len ==
@@ -3359,7 +3466,7 @@ static int haptics_upload_effect(struct input_dev *dev,
 			if (rc < 0) {
 				dev_err(chip->dev, "Upload custom FIFO data failed rc=%d\n",
 						rc);
-				return rc;
+				goto restore;;
 			}
 		} else if (effect->u.periodic.custom_len ==
 				sizeof(s16) * CUSTOM_DATA_LEN) {
@@ -3370,7 +3477,7 @@ static int haptics_upload_effect(struct input_dev *dev,
 			if (rc < 0) {
 				dev_err(chip->dev, "Upload periodic effect failed rc=%d\n",
 						rc);
-				return rc;
+				goto restore;
 			}
 		}
 
@@ -3378,13 +3485,13 @@ static int haptics_upload_effect(struct input_dev *dev,
 	default:
 		dev_err(chip->dev, "%d effect is not supported\n",
 				effect->type);
-		return -EINVAL;
+		goto restore;
 	}
 
 	rc = haptics_enable_hpwr_vreg(chip, true);
 	if (rc < 0) {
 		dev_err(chip->dev, "enable hpwr_vreg failed, rc=%d\n", rc);
-		return rc;
+		goto restore;
 	}
 
 	rc = haptics_wait_hboost_ready(chip);
@@ -3399,10 +3506,15 @@ static int haptics_upload_effect(struct input_dev *dev,
 		mutex_lock(&chip->play.lock);
 		haptics_stop_fifo_play(chip);
 		mutex_unlock(&chip->play.lock);
-		return rc;
+		goto restore;
 	}
 
 	return 0;
+
+restore:
+	if (chip->wa_flags & IGNORE_SWR_IN_SPMI_PLAY)
+		haptics_ignore_swr_play(chip, false);
+	return rc;
 }
 
 static int haptics_playback(struct input_dev *dev, int effect_id, int val)
@@ -3516,14 +3628,14 @@ static int haptics_erase(struct input_dev *dev, int effect_id)
 			dev_err(chip->dev, "stop FIFO playing failed, rc=%d\n",
 					rc);
 			mutex_unlock(&play->lock);
-			return rc;
+			goto restore;
 		}
 	} else {
 		rc = haptics_enable_play(chip, false);
 		if (rc < 0) {
 			dev_err(chip->dev, "stop play failed, rc=%d\n", rc);
 			mutex_unlock(&play->lock);
-			return rc;
+			goto restore;
 		}
 	}
 	mutex_unlock(&play->lock);
@@ -3537,6 +3649,10 @@ static int haptics_erase(struct input_dev *dev, int effect_id)
 		if (rc < 0)
 			dev_err(chip->dev, "visense lra impedance measurement failed, rc=%d\n", rc);
 	}
+restore:
+	/* Restore SWR play mode after SPMI play is done or any faults */
+	if (chip->wa_flags & IGNORE_SWR_IN_SPMI_PLAY)
+		haptics_ignore_swr_play(chip, false);
 
 	return rc;
 }
@@ -4094,6 +4210,7 @@ static int haptics_config_wa(struct haptics_chip *chip)
 			chip->wa_flags |= SW_CTRL_HBST;
 		break;
 	case HAP530_HV:
+		chip->wa_flags |= IGNORE_SWR_IN_SPMI_PLAY | DISCHARGE_VNDRV_LDO;
 		break;
 	default:
 		dev_err(chip->dev, "HW type %d does not match\n",
@@ -4159,6 +4276,11 @@ static int haptics_init_fifo_config(struct haptics_chip *chip)
 
 static int haptics_auto_brake_manual_config(struct haptics_chip *chip);
 
+static int haptics_hbst_ovp_trim_pbs_trigger(struct haptics_chip *chip)
+{
+	return haptics_trigger_pbs(chip, HAP_HBST_OVP_TRIM_PBS);
+}
+
 static int haptics_hw_init(struct haptics_chip *chip)
 {
 	int rc;
@@ -4182,6 +4304,12 @@ static int haptics_hw_init(struct haptics_chip *chip)
 	rc = haptics_init_hpwr_config(chip);
 	if (rc < 0)
 		return rc;
+
+	if (chip->config.hbst_ovp_trim) {
+		rc = haptics_hbst_ovp_trim_pbs_trigger(chip);
+		if (rc < 0)
+			return rc;
+	}
 
 	if (chip->config.is_erm)
 		return 0;
@@ -5117,6 +5245,10 @@ static int haptics_parse_dt(struct haptics_chip *chip)
 		}
 	}
 
+	if (chip->hw_type >= HAP525_HV)
+		config->hbst_ovp_trim = of_property_read_bool(node, "qcom,hbst-ovp-trim");
+	dev_err(chip->dev, "qcom,hbst-ovp-trim = %d\n",config->hbst_ovp_trim);
+
 	config->preload_effect = -EINVAL;
 	rc = haptics_parse_effects_dt(chip);
 	if (rc < 0) {
@@ -5166,25 +5298,17 @@ static int swr_slave_reg_enable(struct regulator_dev *rdev)
 	 * ignore SWR mode until next SWR slave enable request is coming.
 	 */
 	if (is_swr_play_enabled(chip)) {
-		rc = haptics_masked_write(chip, chip->cfg_addr_base,
-				HAP_CFG_TRIG_PRIORITY_REG,
-				SWR_IGNORE_BIT, SWR_IGNORE_BIT);
-		if (rc < 0) {
-			dev_err(chip->dev, "Failed to enable SWR_IGNORE, rc=%d\n", rc);
+		rc = haptics_ignore_swr_play(chip, true);
+		if (rc < 0)
 			return rc;
-		}
 
 		rc = haptics_toggle_module_enable(chip);
 		if (rc < 0)
 			return rc;
 	} else {
-		rc = haptics_masked_write(chip, chip->cfg_addr_base,
-				HAP_CFG_TRIG_PRIORITY_REG,
-				SWR_IGNORE_BIT, 0);
-		if (rc < 0) {
-			dev_err(chip->dev, "Failed to disable SWR_IGNORE, rc=%d\n", rc);
-			return rc;
-		}
+		rc = haptics_ignore_swr_play(chip, false);
+		if (rc < 0)
+ 			return rc;
 	}
 done:
 	chip->swr_slave_enabled = true;
@@ -5699,6 +5823,12 @@ static int haptics_detect_lra_frequency(struct haptics_chip *chip)
 	int rc;
 	u8 autores_cfg, drv_duty_cfg, amplitude, mask, val = 0;
 	u32 vmax_mv = chip->config.vmax_mv;
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	struct device_node *node = chip->dev->of_node;
+	bool adt_drv_brk_duty_en = false;
+	u32 autores_en_delay_cycles,autores_error_window = 0;
+	u32 cl_lra_us_for_f0 = 0;
+#endif
 
 	rc = haptics_read(chip, chip->cfg_addr_base,
 			HAP_CFG_AUTORES_CFG_REG, &autores_cfg, 1);
@@ -5717,11 +5847,20 @@ static int haptics_detect_lra_frequency(struct haptics_chip *chip)
 	if (chip->hw_type >= HAP525_HV) {
 		if (!chip->config.sw_cmd_freq_det)
 			val = AUTORES_EN_BIT;
-
-		val |= AUTORES_EN_DLY_7_CYCLES << AUTORES_EN_DLY_SHIFT |
 #ifdef OPLUS_FEATURE_CHG_BASIC
-			AUTORES_ERR_WINDOW_50_PERCENT | AUTORES_EN_BIT;
+		rc = of_property_read_u32(node, "qcom,autores-en-delay-cycles", &autores_en_delay_cycles);
+		if (rc) {
+			autores_en_delay_cycles = AUTORES_EN_DLY_7_CYCLES;
+		}
+
+		rc = of_property_read_u32(node, "qcom,autores-error-window", &autores_error_window);
+		if (rc) {
+			autores_error_window = AUTORES_ERR_WINDOW_50_PERCENT;
+		}
+		val |= autores_en_delay_cycles << AUTORES_EN_DLY_SHIFT |
+			autores_error_window | AUTORES_EN_BIT;
 #else
+		val |= AUTORES_EN_DLY_7_CYCLES << AUTORES_EN_DLY_SHIFT |
 			AUTORES_ERR_WINDOW_25_PERCENT;
 #endif
 	} else {
@@ -5746,6 +5885,11 @@ static int haptics_detect_lra_frequency(struct haptics_chip *chip)
 			DRV_DUTY_MASK | BRK_DUTY_MASK;
 #ifdef OPLUS_FEATURE_CHG_BASIC
 		val = DRV_DUTY_75_PCT << DRV_DUTY_SHIFT | BRK_DUTY_75_PCT;
+
+		adt_drv_brk_duty_en = of_property_read_bool(node, "qcom,adt_drv_brk_duty_en");
+		if (adt_drv_brk_duty_en) {
+			val |= ADT_DRV_DUTY_EN_BIT | ADT_BRK_DUTY_EN_BIT;
+		}
 #else
 		val = DRV_DUTY_62P5_PCT << DRV_DUTY_SHIFT | BRK_DUTY_75_PCT;
 #endif
@@ -5764,10 +5908,20 @@ static int haptics_detect_lra_frequency(struct haptics_chip *chip)
 			chip->cfg_addr_base + HAP_CFG_DRV_DUTY_CFG_REG, val);
 #endif
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	rc = of_property_read_u32(node, "qcom,cl_lra-period-us", &cl_lra_us_for_f0);
+	if (rc) {
+		cl_lra_us_for_f0 = chip->config.t_lra_us;
+	}
+	dev_err(chip->dev, " cl_lra_us for f0 =%u\n", cl_lra_us_for_f0);
+	rc = haptics_config_openloop_lra_period(chip, cl_lra_us_for_f0);
+	if (rc < 0)
+		goto restore;
+#else
 	rc = haptics_config_openloop_lra_period(chip, chip->config.t_lra_us);
 	if (rc < 0)
 		goto restore;
-
+#endif
 	rc = haptics_set_vmax_headroom_mv(chip, LRA_CALIBRATION_VMAX_HDRM_MV);
 	if (rc < 0)
 		goto restore;
@@ -6003,27 +6157,9 @@ static int haptics_auto_brake_pbs_trigger(struct haptics_chip *chip)
 	if (rc < 0)
 		return rc;
 
-	val = HAP_AUTO_BRAKE_CAL_VAL;
-	rc = nvmem_device_write(chip->hap_cfg_nvmem, PBS_ARG_REG, 1, &val);
+	rc = haptics_trigger_pbs(chip, HAP_AUTO_BRAKE_CAL_PBS);
 	if (rc < 0) {
-		dev_err(chip->dev, "set PBS_ARG for auto brake cal failed, rc=%d\n",
-			rc);
-		return rc;
-	}
-
-	val = PBS_TRIG_CLR_VAL;
-	rc = nvmem_device_write(chip->hap_cfg_nvmem, PBS_TRIG_CLR_REG, 1, &val);
-	if (rc < 0) {
-		dev_err(chip->dev, "clear PBS_TRIG for auto brake cal failed, rc=%d\n",
-			rc);
-		return rc;
-	}
-
-	val = PBS_TRIG_SET_VAL;
-	rc = nvmem_device_write(chip->hap_cfg_nvmem, PBS_TRIG_SET_REG, 1, &val);
-	if (rc < 0) {
-		dev_err(chip->dev, "set PBS_TRIG for auto brake cal failed, rc=%d\n",
-			rc);
+		dev_err(chip->dev, "trigger AUTO_BRAKE_CAL PBS failed, rc=%d\n", rc);
 		return rc;
 	}
 

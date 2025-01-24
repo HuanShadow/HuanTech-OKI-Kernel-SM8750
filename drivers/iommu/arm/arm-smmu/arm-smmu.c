@@ -3836,6 +3836,7 @@ clk_unprepare:
 
 static int arm_smmu_pm_prepare(struct device *dev)
 {
+	int ret = 0;
 	if (!of_device_is_compatible(dev->of_node, "qcom,adreno-smmu"))
 		return 0;
 
@@ -3844,13 +3845,34 @@ static int arm_smmu_pm_prepare(struct device *dev)
 	 * cause a deadlock where cx vote is never put down causing timeout. So,
 	 * abort system suspend here if dev->power.usage_count is 1 as this indicates
 	 * rpm_suspend is in progress and prepare is the one incrementing this counter.
-	 * Now rpm_suspend can continue and put down cx vote. System suspend will resume
-	 * later and complete.
+	 * Now pm runtime put sync suspend will complete the rpm suspend and system
+	 * suspend will resume later and complete.
+	 * in case if runtime still not suspended after sync suspend also then will
+	 * retry with EGAIN by incrementing the usage count to avoid the under flow.
 	 */
 	if (pm_runtime_suspended(dev))
 		return 0;
 
-	return (atomic_read(&dev->power.usage_count) == 1) ? -EINPROGRESS : 0;
+	if (atomic_read(&dev->power.usage_count) == 1) {
+		ret = pm_runtime_put_sync_suspend(dev);
+		/*
+		 * sync suspend would decrement the usage count before rpm suspend
+		 * and this causes usage count under flow in the next sequence of
+		 * runtime suspend operations. due to this underflow, system suspend
+		 * will fail and keeps smmu alive and further it is observed by adreno
+		 * while resuming. which is  warning for every 5 seconds by dumping
+		 * these votes.
+		 * to avoid this problem incremented the usage count back to make sure
+		 * the usage count is align before prepare and after suspend when
+		 * sync supend is invoked.
+		 */
+		pm_runtime_get_noresume(dev);
+		if (ret < 0) {
+			dev_err(dev, "sync supend failed to suspend the rpm\n");
+			return -EAGAIN;
+		}
+	}
+	return 0;
 }
 
 static const struct dev_pm_ops arm_smmu_pm_ops = {

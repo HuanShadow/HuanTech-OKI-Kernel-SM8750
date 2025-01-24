@@ -1796,6 +1796,12 @@ static bool do_pl_notif(struct rq *rq)
 	return (pl > prev) && (load_to_freq(rq, pl - prev) > 400000);
 }
 
+#define CMD_ADD		(1)
+#define CMD_SET		(2)
+static void curr_sum_fixed_set(struct walt_rq *wrq, int cmd, u64 val) {}
+static void prev_sum_fixed_set(struct walt_rq *wrq, int cmd, u64 val) {}
+static u64 curr_sum_fixed(struct walt_rq *wrq) {return 0;}
+
 static void rollover_cpu_window(struct rq *rq, bool full_window)
 {
 	struct walt_rq *wrq = &per_cpu(walt_rq, cpu_of(rq));
@@ -1809,13 +1815,16 @@ static void rollover_cpu_window(struct rq *rq, bool full_window)
 		nt_curr_sum = 0;
 		grp_curr_sum = 0;
 		grp_nt_curr_sum = 0;
+		curr_sum_fixed_set(wrq, CMD_SET, 0);
 	}
 
+	prev_sum_fixed_set(wrq, CMD_SET, curr_sum_fixed(wrq));
 	wrq->prev_runnable_sum = curr_sum;
 	wrq->nt_prev_runnable_sum = nt_curr_sum;
 	wrq->grp_time.prev_runnable_sum = grp_curr_sum;
 	wrq->grp_time.nt_prev_runnable_sum = grp_nt_curr_sum;
 
+	curr_sum_fixed_set(wrq, CMD_SET, 0);
 	wrq->curr_runnable_sum = 0;
 	wrq->nt_curr_runnable_sum = 0;
 	wrq->grp_time.curr_runnable_sum = 0;
@@ -1943,6 +1952,7 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 			delta = irqtime;
 		delta = scale_exec_time(delta, rq, wts);
 		*curr_runnable_sum += delta;
+		curr_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_curr_runnable_sum += delta;
 
@@ -1998,12 +2008,14 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 		}
 
 		*prev_runnable_sum += delta;
+		prev_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_prev_runnable_sum += delta;
 
 		/* Account piece of busy time in the current window. */
 		delta = scale_exec_time(wallclock - window_start, rq, wts);
 		*curr_runnable_sum += delta;
+		curr_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_curr_runnable_sum += delta;
 
@@ -2051,12 +2063,14 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 		}
 
 		*prev_runnable_sum += delta;
+		prev_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_prev_runnable_sum += delta;
 
 		/* Account piece of busy time in the current window. */
 		delta = scale_exec_time(wallclock - window_start, rq, wts);
 		*curr_runnable_sum += delta;
+		curr_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_curr_runnable_sum += delta;
 
@@ -2091,6 +2105,7 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 		 */
 		if (mark_start > window_start) {
 			*curr_runnable_sum += scale_exec_time(irqtime, rq, wts);
+			curr_sum_fixed_set(wrq, CMD_ADD, scale_exec_time(irqtime, rq, wts));
 			return;
 		}
 
@@ -2103,10 +2118,12 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 			delta = window_size;
 		delta = scale_exec_time(delta, rq, wts);
 		*prev_runnable_sum += delta;
+		prev_sum_fixed_set(wrq, CMD_ADD, delta);
 
 		/* Process the remaining IRQ busy time in the current window. */
 		delta = wallclock - window_start;
 		wrq->curr_runnable_sum += scale_exec_time(delta, rq, wts);
+		curr_sum_fixed_set(wrq, CMD_ADD, scale_exec_time(delta, rq, wts));
 
 		return;
 	}
@@ -4626,6 +4643,8 @@ static void walt_sched_init_rq(struct rq *rq)
 	wrq->lrb_pipeline_start_time = 0;
 
 	wrq->curr_runnable_sum = wrq->prev_runnable_sum = 0;
+	curr_sum_fixed_set(wrq, CMD_SET, 0);
+	prev_sum_fixed_set(wrq, CMD_SET, 0);
 	wrq->nt_curr_runnable_sum = wrq->nt_prev_runnable_sum = 0;
 	memset(&wrq->grp_time, 0, sizeof(struct group_cpu_time));
 	wrq->old_busy_time = 0;
