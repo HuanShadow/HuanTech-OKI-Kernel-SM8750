@@ -1149,7 +1149,11 @@ walt_select_task_rq_fair(void *unused, struct task_struct *p, int prev_cpu,
 {
 	int sync;
 	int sibling_count_hint;
-
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(select_task_rq_fair, p, target_cpu, wake_flags, prev_cpu);
+	if (*target_cpu >= 0)
+		return;
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -1474,6 +1478,11 @@ static void walt_cfs_check_preempt_wakeup(void *unused, struct rq *rq, struct ta
 	bool resched = false, skip_mvp;
 	bool p_is_mvp, curr_is_mvp;
 
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(cfs_check_preempt_wakeup, rq, p, preempt, nopreempt);
+	if (*preempt || *nopreempt)
+		return;
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -1545,6 +1554,11 @@ static void walt_cfs_replace_next_task_fair(void *unused, struct rq *rq, struct 
 	struct task_struct *mvp;
 	struct cfs_rq *cfs_rq;
 
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(replace_next_task_fair, rq, p, se, repick, simple, prev);
+	if (*repick)
+		return;
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -1600,6 +1614,11 @@ static void walt_cfs_replace_next_task_fair(void *unused, struct rq *rq, struct 
 
 	trace_walt_cfs_mvp_pick_next(mvp, wts, walt_cfs_mvp_task_limit(mvp));
 #else
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(replace_next_task_fair, rq, p, se, repick, simple, prev);
+	if (*repick)
+		return;
+#endif
 	android_rvh_replace_next_task_fair_handler(NULL, rq, p, se, repick, simple, prev);
 #endif
 }

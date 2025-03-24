@@ -712,6 +712,10 @@ void walt_lb_tick(struct rq *rq)
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
 	bool need_up_migrate = false;
 #endif
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	if (SCX_CALL_OP_RET(lb_tick_bypass, rq))
+		return;
+#endif
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_LOADBALANCE)
 	if (__oplus_tick_balance(NULL, rq))
 		return;
@@ -905,7 +909,11 @@ static void walt_newidle_balance(struct rq *this_rq,
 	int has_misfit = 0;
 	int i;
 	struct task_struct *pulled_task_struct = NULL;
-
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(newidle_balance, this_rq, rf, pulled_task, done, false);
+	if (*done)
+		return;
+#endif
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_LOADBALANCE)
 	if (__oplus_newidle_balance(NULL, this_rq, rf, pulled_task, done))
 		return;
@@ -1120,6 +1128,9 @@ done:
 static void walt_nohz_balancer_kick(void *unused, struct rq *rq,
 				    unsigned int *flags, int *done)
 {
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(nohz_balancer_kick, rq, flags, done);
+#endif
 	if (unlikely(walt_disabled))
 		return;
 	*done = 1;

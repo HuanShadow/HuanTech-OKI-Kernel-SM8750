@@ -89,6 +89,9 @@ struct irq_work walt_migration_irq_work;
 unsigned int walt_rotation_enabled;
 
 unsigned int __read_mostly sched_ravg_window = 20000000;
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+EXPORT_SYMBOL(sched_ravg_window);
+#endif
 int min_possible_cluster_id;
 int max_possible_cluster_id;
 /* Initial task load. Newly created tasks are assigned this load. */
@@ -1796,12 +1799,6 @@ static bool do_pl_notif(struct rq *rq)
 	return (pl > prev) && (load_to_freq(rq, pl - prev) > 400000);
 }
 
-#define CMD_ADD		(1)
-#define CMD_SET		(2)
-static void curr_sum_fixed_set(struct walt_rq *wrq, int cmd, u64 val) {}
-static void prev_sum_fixed_set(struct walt_rq *wrq, int cmd, u64 val) {}
-static u64 curr_sum_fixed(struct walt_rq *wrq) {return 0;}
-
 static void rollover_cpu_window(struct rq *rq, bool full_window)
 {
 	struct walt_rq *wrq = &per_cpu(walt_rq, cpu_of(rq));
@@ -1815,16 +1812,13 @@ static void rollover_cpu_window(struct rq *rq, bool full_window)
 		nt_curr_sum = 0;
 		grp_curr_sum = 0;
 		grp_nt_curr_sum = 0;
-		curr_sum_fixed_set(wrq, CMD_SET, 0);
 	}
 
-	prev_sum_fixed_set(wrq, CMD_SET, curr_sum_fixed(wrq));
 	wrq->prev_runnable_sum = curr_sum;
 	wrq->nt_prev_runnable_sum = nt_curr_sum;
 	wrq->grp_time.prev_runnable_sum = grp_curr_sum;
 	wrq->grp_time.nt_prev_runnable_sum = grp_nt_curr_sum;
 
-	curr_sum_fixed_set(wrq, CMD_SET, 0);
 	wrq->curr_runnable_sum = 0;
 	wrq->nt_curr_runnable_sum = 0;
 	wrq->grp_time.curr_runnable_sum = 0;
@@ -1952,7 +1946,6 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 			delta = irqtime;
 		delta = scale_exec_time(delta, rq, wts);
 		*curr_runnable_sum += delta;
-		curr_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_curr_runnable_sum += delta;
 
@@ -2008,14 +2001,12 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 		}
 
 		*prev_runnable_sum += delta;
-		prev_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_prev_runnable_sum += delta;
 
 		/* Account piece of busy time in the current window. */
 		delta = scale_exec_time(wallclock - window_start, rq, wts);
 		*curr_runnable_sum += delta;
-		curr_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_curr_runnable_sum += delta;
 
@@ -2063,14 +2054,12 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 		}
 
 		*prev_runnable_sum += delta;
-		prev_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_prev_runnable_sum += delta;
 
 		/* Account piece of busy time in the current window. */
 		delta = scale_exec_time(wallclock - window_start, rq, wts);
 		*curr_runnable_sum += delta;
-		curr_sum_fixed_set(wrq, CMD_ADD, delta);
 		if (new_task)
 			*nt_curr_runnable_sum += delta;
 
@@ -2105,7 +2094,6 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 		 */
 		if (mark_start > window_start) {
 			*curr_runnable_sum += scale_exec_time(irqtime, rq, wts);
-			curr_sum_fixed_set(wrq, CMD_ADD, scale_exec_time(irqtime, rq, wts));
 			return;
 		}
 
@@ -2118,12 +2106,10 @@ static void update_cpu_busy_time(struct task_struct *p, struct rq *rq,
 			delta = window_size;
 		delta = scale_exec_time(delta, rq, wts);
 		*prev_runnable_sum += delta;
-		prev_sum_fixed_set(wrq, CMD_ADD, delta);
 
 		/* Process the remaining IRQ busy time in the current window. */
 		delta = wallclock - window_start;
 		wrq->curr_runnable_sum += scale_exec_time(delta, rq, wts);
-		curr_sum_fixed_set(wrq, CMD_ADD, scale_exec_time(delta, rq, wts));
 
 		return;
 	}
@@ -2155,6 +2141,10 @@ account_busy_for_task_demand(struct rq *rq, struct task_struct *p, int event)
 	 */
 	if (walt_is_idle_task(p))
 		return 0;
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	if (SCX_CALL_OP_RET(account_for_runnable_bypass, rq, p, event))
+		return 0;
+#endif
 	/*
 	 * When a task is waking up it is completing a segment of non-busy
 	 * time. Likewise, if wait time is not treated as busy time, then
@@ -2565,6 +2555,9 @@ static inline int run_walt_irq_work_rollover(u64 old_window_start, struct rq *rq
 	if (result == old_window_start) {
 		walt_irq_work_queue(&walt_cpufreq_irq_work);
 		trace_walt_window_rollover(wrq->window_start);
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+		SCX_CALL_OP(window_rollover_run_once, rq);
+#endif
 
 		return 1;
 	}
@@ -4643,8 +4636,6 @@ static void walt_sched_init_rq(struct rq *rq)
 	wrq->lrb_pipeline_start_time = 0;
 
 	wrq->curr_runnable_sum = wrq->prev_runnable_sum = 0;
-	curr_sum_fixed_set(wrq, CMD_SET, 0);
-	prev_sum_fixed_set(wrq, CMD_SET, 0);
 	wrq->nt_curr_runnable_sum = wrq->nt_prev_runnable_sum = 0;
 	memset(&wrq->grp_time, 0, sizeof(struct group_cpu_time));
 	wrq->old_busy_time = 0;
@@ -4821,6 +4812,9 @@ static void android_rvh_enqueue_task(void *unused, struct rq *rq,
 	bool double_enqueue = false;
 	int mid_cluster_cpu;
 
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(enqueue_task, rq, p, 0);
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -4894,6 +4888,9 @@ static void android_rvh_dequeue_task(void *unused, struct rq *rq,
 	struct walt_rq *wrq = &per_cpu(walt_rq, cpu_of(rq));
 	struct walt_task_struct *wts = (struct walt_task_struct *) p->android_vendor_data1;
 	bool double_dequeue = false;
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(dequeue_task, rq, p, 0);
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -5057,6 +5054,9 @@ static unsigned long calculate_ipc(int cpu)
 static void android_rvh_tick_entry(void *unused, struct rq *rq)
 {
 	u64 wallclock;
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(tick_entry, rq);
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -5135,6 +5135,9 @@ static void android_vh_scheduler_tick(void *unused, struct rq *rq)
 		tick_sched_clock = rq->clock - 20000;
 		complete(&tick_sched_clock_completion);
 	}
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(scheduler_tick, rq);
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -5193,6 +5196,9 @@ static void android_rvh_schedule(void *unused, struct task_struct *prev,
 {
 	u64 wallclock;
 	struct walt_task_struct *wts = (struct walt_task_struct *) prev->android_vendor_data1;
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(schedule, prev, next, rq);
+#endif
 	if (unlikely(walt_disabled))
 		return;
 
@@ -5285,6 +5291,12 @@ static void walt_do_sched_yield_before(void *unused, long *skip)
 	struct walt_sched_cluster *cluster = cpu_cluster(task_cpu(current));
 	struct smart_freq_cluster_info *smart_freq_info = cluster->smart_freq_info;
 	bool in_legacy_uncap;
+
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+	SCX_CALL_OP(do_sched_yield_before, skip);
+	if (*skip)
+		return;
+#endif
 
 	if (!walt_fair_task(current))
 		return;
@@ -5573,6 +5585,24 @@ static void walt_init(struct work_struct *work)
 
 	topology_clear_scale_freq_source(SCALE_FREQ_SOURCE_ARCH, cpu_online_mask);
 }
+
+#ifdef CONFIG_HMBIRD_SCHED_GKI
+struct scx_sched_gki_ops *scx_sched_ops __read_mostly;
+
+int register_scx_sched_gki_ops(struct scx_sched_gki_ops *ops)
+{
+	if (!ops)
+		return -1;
+
+	if (cmpxchg(&scx_sched_ops, NULL, ops)) {
+		pr_warn("scx_sched_gki_ops has already been registered!\n");
+		return -1;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(register_scx_sched_gki_ops);
+#endif
 
 static DECLARE_WORK(walt_init_work, walt_init);
 static void android_vh_update_topology_flags_workfn(void *unused, void *unused2)
